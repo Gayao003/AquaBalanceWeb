@@ -239,23 +239,6 @@ export default function AppShowcase() {
             })}
           </AnimatePresence>
         </motion.div>
-
-        {/* Developer / Admin Instruction Banner for Screenshots */}
-        <div className="mt-14 max-w-3xl mx-auto bg-sky-50 border border-sky-200 rounded-2xl p-4 sm:p-5 flex items-start gap-4 text-xs sm:text-sm text-sky-900">
-          <span className="text-xl shrink-0">📸</span>
-          <div>
-            <p className="font-bold text-sky-950 mb-1">
-              Adding Custom Screenshots to Your Deployment:
-            </p>
-            <p className="leading-relaxed text-sky-800/90">
-              Save your mobile screenshots directly to{" "}
-              <code className="bg-sky-100 text-sky-900 font-semibold px-1.5 py-0.5 rounded">
-                admin_website/public/images/screenshots/
-              </code>{" "}
-              using the filenames shown above (e.g. <code className="font-semibold">patient-dashboard.png</code>, <code className="font-semibold">nurse-dashboard.png</code>). The website will automatically display your real screenshots upon build or reload!
-            </p>
-          </div>
-        </div>
       </div>
     </section>
   );

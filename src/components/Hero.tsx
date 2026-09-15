@@ -113,16 +113,6 @@ export default function Hero() {
                     (e.target as HTMLImageElement).style.display = "none";
                   }}
                 />
-                {/* Placeholder overlay shown when no screenshot */}
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6">
-                  <div className="text-5xl">💧</div>
-                  <p className="text-white/60 text-xs text-center">
-                    Replace with your app screenshot at{" "}
-                    <code className="text-sky-300">
-                      /public/images/app-screenshot.png
-                    </code>
-                  </p>
-                </div>
               </div>
             </div>
             {/* Side button accents */}
