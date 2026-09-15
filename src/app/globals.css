@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+:root {
+  --aqua: #0ea5e9;
+  --aqua-dark: #0369a1;
+  --aqua-light: #7dd3fc;
+  --navy: #0f172a;
+  --glass-bg: rgba(255, 255, 255, 0.6);
+  --glass-border: rgba(255, 255, 255, 0.4);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: #f0f9ff;
+  color: #0f172a;
+  font-family: "Inter", sans-serif;
+}
+
+/* Ambient water blob shapes */
+.water-blob {
+  border-radius: 61% 39% 65% 35% / 50% 62% 38% 50%;
+  filter: blur(60px);
+  opacity: 0.18;
+  position: absolute;
+  pointer-events: none;
+}
+
+/* Glass card style */
+.glass {
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 4px 32px rgba(14, 165, 233, 0.06);
+}
+
+.glass-dark {
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Ripple animation */
+@keyframes ripple {
+  0% { transform: scale(0.8); opacity: 0.6; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
+.ripple-circle {
+  animation: ripple 2.5s ease-out infinite;
+}
+
+.ripple-circle:nth-child(2) { animation-delay: 0.8s; }
+.ripple-circle:nth-child(3) { animation-delay: 1.6s; }
+
+/* Phone float */
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-12px); }
+}
+
+.phone-float {
+  animation: float 4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .phone-float, .ripple-circle, .water-blob {
+    animation: none !important;
+    transition: none !important;
+  }
+}
