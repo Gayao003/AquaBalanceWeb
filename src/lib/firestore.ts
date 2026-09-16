@@ -267,7 +267,7 @@ export interface OutputRecord {
   notes?: string;
 }
 
-export async function getUserIntakeEntries(userId: string): Promise<IntakeRecord[]> {
+export async function getUserIntakeEntries(userId: string, limitCount?: number): Promise<IntakeRecord[]> {
   try {
     const q = query(
       collection(db, "intake_entries"),
@@ -276,14 +276,14 @@ export async function getUserIntakeEntries(userId: string): Promise<IntakeRecord
     const snap = await getDocs(q);
     const items = snap.docs.map((d) => ({ id: d.id, ...d.data() } as IntakeRecord));
     items.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-    return items.slice(0, 50);
+    return limitCount !== undefined ? items.slice(0, limitCount) : items;
   } catch (e) {
     console.error("Error fetching intake entries:", e);
     return [];
   }
 }
 
-export async function getUserOutputEntries(userId: string): Promise<OutputRecord[]> {
+export async function getUserOutputEntries(userId: string, limitCount?: number): Promise<OutputRecord[]> {
   try {
     const q = query(
       collection(db, "output_entries"),
@@ -292,9 +292,39 @@ export async function getUserOutputEntries(userId: string): Promise<OutputRecord
     const snap = await getDocs(q);
     const items = snap.docs.map((d) => ({ id: d.id, ...d.data() } as OutputRecord));
     items.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-    return items.slice(0, 50);
+    return limitCount !== undefined ? items.slice(0, limitCount) : items;
   } catch (e) {
     console.error("Error fetching output entries:", e);
+    return [];
+  }
+}
+
+export async function getAllHealthProfiles(): Promise<HealthProfile[]> {
+  try {
+    const snap = await getDocs(collection(db, "health_profiles"));
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() } as HealthProfile));
+  } catch (e) {
+    console.error("Error fetching all health profiles:", e);
+    return [];
+  }
+}
+
+export async function getAllIntakeEntries(): Promise<IntakeRecord[]> {
+  try {
+    const snap = await getDocs(collection(db, "intake_entries"));
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() } as IntakeRecord));
+  } catch (e) {
+    console.error("Error fetching all intake entries:", e);
+    return [];
+  }
+}
+
+export async function getAllOutputEntries(): Promise<OutputRecord[]> {
+  try {
+    const snap = await getDocs(collection(db, "output_entries"));
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() } as OutputRecord));
+  } catch (e) {
+    console.error("Error fetching all output entries:", e);
     return [];
   }
 }

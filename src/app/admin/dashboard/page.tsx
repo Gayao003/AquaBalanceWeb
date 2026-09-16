@@ -6,6 +6,7 @@ import {
   Loader2, UserCheck, Stethoscope, Download, ChevronLeft, ChevronRight,
   Archive, RotateCcw, Mail, Settings, Activity, UserPlus, Lock, Unlock,
   Eye, EyeOff, Copy, ShieldCheck,
+  FileDown, CalendarRange, CheckSquare,
 } from "lucide-react";
 import {
   getAllUsers, updateUserRole, toggleArchiveUser, sendUserPasswordReset,
@@ -14,9 +15,24 @@ import {
   getUserOutputEntries, signOut, UserProfile, HealthProfile,
   IntakeRecord, OutputRecord,
   createManagedUser, CreateManagedUserResult,
+  getAllHealthProfiles, getAllIntakeEntries, getAllOutputEntries,
 } from "@/lib/firestore";
 import { useRouter } from "next/navigation";
 import { auth } from "@/lib/firebase";
+import {
+  exportComprehensiveRosterCSV,
+  exportPatientLogsCSV,
+  exportPatientLogsPDF,
+  exportNurseCaseloadCSV,
+  exportNurseCaseloadPDF,
+  PatientExportItem,
+  NurseCaseloadExportItem,
+  NurseHandledPatientRecord,
+  isWithinDateRange,
+  PATIENT_EXPORT_COLUMNS,
+  NURSE_EXPORT_COLUMNS,
+  ColumnDef,
+} from "@/lib/exportUtils";
 
 const ROLE_COLORS: Record<string, string> = {
   patient: "bg-sky-500/20 text-sky-300 border-sky-500/30",
@@ -78,6 +94,18 @@ export default function DashboardPage() {
   const [addResult, setAddResult] = useState<CreateManagedUserResult | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // Row selection & export state (Strict Role-Separated)
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportDateFrom, setExportDateFrom] = useState("");
+  const [exportDateTo, setExportDateTo] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [exportingRoster, setExportingRoster] = useState(false);
+  const [selectedNursePatientIds, setSelectedNursePatientIds] = useState<Record<string, string[]>>({});
+  const [includeNursePatients, setIncludeNursePatients] = useState(true);
+  const [exportPreset, setExportPreset] = useState<"all" | "today" | "7d" | "30d" | "month">("all");
+  const [selectedColumnIds, setSelectedColumnIds] = useState<string[]>([]);
 
   const showToast = useCallback((t: Toast) => {
     setToast(t);
@@ -270,30 +298,330 @@ export default function DashboardPage() {
     }
   }
 
-  function handleExportCSV() {
+  // ── Comprehensive Clinical Roster Export (Top Bar) ─────────────────────────
+  async function handleExportCSV() {
     if (filtered.length === 0) {
       showToast({ type: "error", msg: "No users to export." });
       return;
     }
-    const headers = ["User ID", "Name", "Email", "Role", "Status", "Volume Unit", "Joined Date"];
-    const rows = filtered.map((u) => [
-      `"${u.userId}"`,
-      `"${u.name.replace(/"/g, '""')}"`,
-      `"${u.email}"`,
-      `"${u.role}"`,
-      `"${u.isArchived ? "Archived" : "Active"}"`,
-      `"${u.volumeUnit || "ml"}"`,
-      `"${u.createdAt ? new Date(u.createdAt).toLocaleDateString() : "—"}"`,
-    ]);
+    setExportingRoster(true);
+    try {
+      const [hProfiles, allIntakes, allOutputs] = await Promise.all([
+        getAllHealthProfiles(),
+        getAllIntakeEntries(),
+        getAllOutputEntries(),
+      ]);
+      await exportComprehensiveRosterCSV(filtered, hProfiles, allIntakes, allOutputs);
+      showToast({ type: "success", msg: `Exported clinical roster for ${filtered.length} account(s).` });
+    } catch (err) {
+      console.error(err);
+      showToast({ type: "error", msg: "Failed to export roster CSV." });
+    } finally {
+      setExportingRoster(false);
+    }
+  }
 
-    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map((e) => e.join(","))].join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `aquabalance_users_${new Date().toISOString().slice(0, 10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  // ── Role-Enforced Row Selection Helpers ─────────────────────────────────────
+  const selectedUsers = users.filter((u) => selectedUserIds.includes(u.userId));
+  const activeSelectedRole = selectedUsers.length > 0 ? selectedUsers[0].role : null;
+
+  function toggleSelectUser(userId: string) {
+    const targetUser = users.find((u) => u.userId === userId);
+    if (!targetUser) return;
+
+    // Disallow mixing different roles in a single export batch
+    if (selectedUserIds.length > 0 && activeSelectedRole && targetUser.role !== activeSelectedRole) {
+      showToast({
+        type: "error",
+        msg: `Cannot mix roles in export. You have ${activeSelectedRole === "nurse" ? "Nurses" : "Patients"} selected. Clear selection to switch roles.`,
+      });
+      return;
+    }
+
+    setSelectedUserIds((prev) =>
+      prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]
+    );
+  }
+
+  function toggleSelectAll() {
+    let targetRole = activeSelectedRole;
+    if (!targetRole) {
+      targetRole = roleFilter === "nurse" ? "nurse" : "patient";
+    }
+
+    const eligibleUsers = paginatedUsers.filter((u) => u.role === targetRole);
+    const eligibleIds = eligibleUsers.map((u) => u.userId);
+
+    if (eligibleIds.length === 0) {
+      showToast({
+        type: "error",
+        msg: `No ${targetRole}s found on the current page to select.`,
+      });
+      return;
+    }
+
+    const allSelected = eligibleIds.every((id) => selectedUserIds.includes(id));
+    if (allSelected) {
+      setSelectedUserIds((prev) => prev.filter((id) => !eligibleIds.includes(id)));
+    } else {
+      setSelectedUserIds((prev) => Array.from(new Set([...prev, ...eligibleIds])));
+      if (!activeSelectedRole && roleFilter === "all") {
+        showToast({
+          type: "success",
+          msg: `Selected all ${eligibleIds.length} ${targetRole}s on this page. (Role mixing is disabled for exports).`,
+        });
+      }
+    }
+  }
+
+  function openExportModal() {
+    if (selectedUserIds.length === 0) return;
+
+    if (activeSelectedRole === "nurse") {
+      const selectedNurses = users.filter((u) => selectedUserIds.includes(u.userId) && u.role === "nurse");
+      const initialMap: Record<string, string[]> = {};
+      selectedNurses.forEach((nurse) => {
+        const handled = allPatients.filter(
+          (p) => p.assignedNurseIds?.includes(nurse.userId) || nurse.assignedPatientIds?.includes(p.userId)
+        );
+        initialMap[nurse.userId] = handled.map((p) => p.userId);
+      });
+      setSelectedNursePatientIds(initialMap);
+      setIncludeNursePatients(true);
+      setSelectedColumnIds(NURSE_EXPORT_COLUMNS.filter((c) => c.defaultSelected).map((c) => c.id));
+    } else {
+      setSelectedColumnIds(PATIENT_EXPORT_COLUMNS.filter((c) => c.defaultSelected).map((c) => c.id));
+    }
+
+    setExportPreset("all");
+    setExportDateFrom("");
+    setExportDateTo("");
+    setShowExportModal(true);
+  }
+
+  function toggleNursePatient(nurseId: string, patientId: string) {
+    setSelectedNursePatientIds((prev) => {
+      const current = prev[nurseId] || [];
+      const updated = current.includes(patientId)
+        ? current.filter((id) => id !== patientId)
+        : [...current, patientId];
+      return { ...prev, [nurseId]: updated };
+    });
+  }
+
+  function toggleAllNursePatients(nurseId: string, allPatientIds: string[]) {
+    setSelectedNursePatientIds((prev) => {
+      const current = prev[nurseId] || [];
+      const isAll = allPatientIds.every((id) => current.includes(id));
+      return { ...prev, [nurseId]: isAll ? [] : [...allPatientIds] };
+    });
+  }
+
+  function applyDatePreset(preset: "all" | "today" | "7d" | "30d" | "month") {
+    setExportPreset(preset);
+    const now = new Date();
+    const toDate = now.toISOString().slice(0, 10);
+
+    if (preset === "all") {
+      setExportDateFrom("");
+      setExportDateTo("");
+    } else if (preset === "today") {
+      setExportDateFrom(toDate);
+      setExportDateTo(toDate);
+    } else if (preset === "7d") {
+      const past = new Date();
+      past.setDate(past.getDate() - 7);
+      setExportDateFrom(past.toISOString().slice(0, 10));
+      setExportDateTo(toDate);
+    } else if (preset === "30d") {
+      const past = new Date();
+      past.setDate(past.getDate() - 30);
+      setExportDateFrom(past.toISOString().slice(0, 10));
+      setExportDateTo(toDate);
+    } else if (preset === "month") {
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      setExportDateFrom(startOfMonth.toISOString().slice(0, 10));
+      setExportDateTo(toDate);
+    }
+  }
+
+
+  function toggleColumn(colId: string) {
+    setSelectedColumnIds((prev) => {
+      if (prev.includes(colId)) {
+        if (prev.length <= 1) return prev; // Keep at least 1 column selected
+        return prev.filter((id) => id !== colId);
+      } else {
+        return [...prev, colId];
+      }
+    });
+  }
+
+  function resetToDefaultColumns() {
+    const pool = activeSelectedRole === "nurse" ? NURSE_EXPORT_COLUMNS : PATIENT_EXPORT_COLUMNS;
+    setSelectedColumnIds(pool.filter((c) => c.defaultSelected).map((c) => c.id));
+  }
+
+  function selectAllColumns() {
+    const pool = activeSelectedRole === "nurse" ? NURSE_EXPORT_COLUMNS : PATIENT_EXPORT_COLUMNS;
+    setSelectedColumnIds(pool.map((c) => c.id));
+  }
+  // ── CSV Export Router (Patient vs Nurse) ───────────────────────────────────
+  async function handleExportLogsCSV() {
+    setExporting(true);
+    try {
+      if (activeSelectedRole === "nurse") {
+        const nurseItems: NurseCaseloadExportItem[] = [];
+        const selectedNurses = users.filter((u) => selectedUserIds.includes(u.userId) && u.role === "nurse");
+
+        for (const nurse of selectedNurses) {
+          const allHandled = allPatients.filter(
+            (p) => p.assignedNurseIds?.includes(nurse.userId) || nurse.assignedPatientIds?.includes(p.userId)
+          );
+          const chosenPatientIds = includeNursePatients ? (selectedNursePatientIds[nurse.userId] || []) : [];
+          const activeHandled = allHandled.filter((p) => chosenPatientIds.includes(p.userId));
+
+          const handledRecords: NurseHandledPatientRecord[] = [];
+          for (const patient of activeHandled) {
+            const [hProfiles, intakes, outputs] = await Promise.all([
+              getHealthProfilesForUser(patient.userId),
+              getUserIntakeEntries(patient.userId),
+              getUserOutputEntries(patient.userId),
+            ]);
+            const filteredIntakes = intakes.filter((r) => isWithinDateRange(r.timestamp, exportDateFrom, exportDateTo));
+            const filteredOutputs = outputs.filter((r) => isWithinDateRange(r.timestamp, exportDateFrom, exportDateTo));
+            handledRecords.push({
+              patient,
+              healthProfile: hProfiles[0] || null,
+              intakes: filteredIntakes,
+              outputs: filteredOutputs,
+            });
+          }
+
+          nurseItems.push({
+            nurse,
+            totalCaseloadCount: allHandled.length,
+            handledPatients: handledRecords,
+          });
+        }
+
+        await exportNurseCaseloadCSV(nurseItems, exportDateFrom, exportDateTo, selectedColumnIds);
+        showToast({ type: "success", msg: `Exported caseload CSV for ${nurseItems.length} nurse(s).` });
+      } else {
+        // Patient role
+        const patientItems: PatientExportItem[] = [];
+        const selectedPatients = users.filter((u) => selectedUserIds.includes(u.userId) && u.role === "patient");
+
+        for (const patient of selectedPatients) {
+          const [hProfiles, intakes, outputs] = await Promise.all([
+            getHealthProfilesForUser(patient.userId),
+            getUserIntakeEntries(patient.userId),
+            getUserOutputEntries(patient.userId),
+          ]);
+          const filteredIntakes = intakes.filter((r) => isWithinDateRange(r.timestamp, exportDateFrom, exportDateTo));
+          const filteredOutputs = outputs.filter((r) => isWithinDateRange(r.timestamp, exportDateFrom, exportDateTo));
+          const nurseNames = (patient.assignedNurseIds || [])
+            .map((nid) => nurseMap.get(nid)?.name || nurseMap.get(nid)?.email || nid);
+
+          patientItems.push({
+            patient,
+            healthProfile: hProfiles[0] || null,
+            assignedNurses: nurseNames,
+            intakes: filteredIntakes,
+            outputs: filteredOutputs,
+          });
+        }
+
+        await exportPatientLogsCSV(patientItems, exportDateFrom, exportDateTo, selectedColumnIds);
+        showToast({ type: "success", msg: `Exported fluid logs CSV for ${patientItems.length} patient(s).` });
+      }
+
+      setShowExportModal(false);
+    } catch (err) {
+      console.error(err);
+      showToast({ type: "error", msg: "Failed to export CSV." });
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  // ── PDF Export Router (Patient vs Nurse) ───────────────────────────────────
+  async function handleExportLogsPDF() {
+    setExporting(true);
+    try {
+      if (activeSelectedRole === "nurse") {
+        const nurseItems: NurseCaseloadExportItem[] = [];
+        const selectedNurses = users.filter((u) => selectedUserIds.includes(u.userId) && u.role === "nurse");
+
+        for (const nurse of selectedNurses) {
+          const allHandled = allPatients.filter(
+            (p) => p.assignedNurseIds?.includes(nurse.userId) || nurse.assignedPatientIds?.includes(p.userId)
+          );
+          const chosenPatientIds = includeNursePatients ? (selectedNursePatientIds[nurse.userId] || []) : [];
+          const activeHandled = allHandled.filter((p) => chosenPatientIds.includes(p.userId));
+
+          const handledRecords: NurseHandledPatientRecord[] = [];
+          for (const patient of activeHandled) {
+            const [hProfiles, intakes, outputs] = await Promise.all([
+              getHealthProfilesForUser(patient.userId),
+              getUserIntakeEntries(patient.userId),
+              getUserOutputEntries(patient.userId),
+            ]);
+            const filteredIntakes = intakes.filter((r) => isWithinDateRange(r.timestamp, exportDateFrom, exportDateTo));
+            const filteredOutputs = outputs.filter((r) => isWithinDateRange(r.timestamp, exportDateFrom, exportDateTo));
+            handledRecords.push({
+              patient,
+              healthProfile: hProfiles[0] || null,
+              intakes: filteredIntakes,
+              outputs: filteredOutputs,
+            });
+          }
+
+          nurseItems.push({
+            nurse,
+            totalCaseloadCount: allHandled.length,
+            handledPatients: handledRecords,
+          });
+        }
+
+        await exportNurseCaseloadPDF(nurseItems, exportDateFrom, exportDateTo, selectedColumnIds);
+        showToast({ type: "success", msg: `Exported caseload clinical PDF for ${nurseItems.length} nurse(s).` });
+      } else {
+        // Patient role
+        const patientItems: PatientExportItem[] = [];
+        const selectedPatients = users.filter((u) => selectedUserIds.includes(u.userId) && u.role === "patient");
+
+        for (const patient of selectedPatients) {
+          const [hProfiles, intakes, outputs] = await Promise.all([
+            getHealthProfilesForUser(patient.userId),
+            getUserIntakeEntries(patient.userId),
+            getUserOutputEntries(patient.userId),
+          ]);
+          const filteredIntakes = intakes.filter((r) => isWithinDateRange(r.timestamp, exportDateFrom, exportDateTo));
+          const filteredOutputs = outputs.filter((r) => isWithinDateRange(r.timestamp, exportDateFrom, exportDateTo));
+          const nurseNames = (patient.assignedNurseIds || [])
+            .map((nid) => nurseMap.get(nid)?.name || nurseMap.get(nid)?.email || nid);
+
+          patientItems.push({
+            patient,
+            healthProfile: hProfiles[0] || null,
+            assignedNurses: nurseNames,
+            intakes: filteredIntakes,
+            outputs: filteredOutputs,
+          });
+        }
+
+        await exportPatientLogsPDF(patientItems, exportDateFrom, exportDateTo, selectedColumnIds);
+        showToast({ type: "success", msg: `Exported clinical report PDF for ${patientItems.length} patient(s).` });
+      }
+
+      setShowExportModal(false);
+    } catch (err) {
+      console.error(err);
+      showToast({ type: "error", msg: "Failed to export PDF." });
+    } finally {
+      setExporting(false);
+    }
   }
 
   async function handleSignOut() {
@@ -759,6 +1087,15 @@ export default function DashboardPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-white/5 text-slate-500 text-xs uppercase tracking-wider">
+                    <th className="px-4 py-3.5 text-center w-10">
+                      <input
+                        type="checkbox"
+                        aria-label="Select all"
+                        checked={selectedUserIds.length > 0 && selectedUserIds.length === paginatedUsers.filter(u => !activeSelectedRole || u.role === activeSelectedRole).length}
+                        onChange={toggleSelectAll}
+                        className="accent-sky-400 cursor-pointer w-4 h-4"
+                      />
+                    </th>
                     <th className="px-5 py-3.5 text-left font-semibold">User</th>
                     <th className="px-5 py-3.5 text-left font-semibold">Role</th>
                     <th className="px-5 py-3.5 text-left font-semibold">Status</th>
@@ -769,27 +1106,46 @@ export default function DashboardPage() {
                 <tbody>
                   {loading ? (
                     <tr>
-                      <td colSpan={5} className="text-center py-16 text-slate-500">
+                      <td colSpan={6} className="text-center py-16 text-slate-500">
                         <Loader2 className="mx-auto animate-spin mb-2" size={20} />
                         Loading user roster…
                       </td>
                     </tr>
                   ) : paginatedUsers.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="text-center py-16 text-slate-500">
+                      <td colSpan={6} className="text-center py-16 text-slate-500">
                         No matching users found.
                       </td>
                     </tr>
                   ) : (
-                    paginatedUsers.map((user) => (
-                      <tr
-                        key={user.userId}
-                        className={`border-b border-white/5 hover:bg-white/2 transition ${
-                          user.isArchived ? "opacity-60 bg-red-950/10" : ""
-                        }`}
-                      >
-                        <td className="px-5 py-4">
-                          <div className="flex items-center gap-3">
+                    paginatedUsers.map((user) => {
+                      const isSelected = selectedUserIds.includes(user.userId);
+                      const isRoleDisabled = !!activeSelectedRole && user.role !== activeSelectedRole;
+                      return (
+                        <tr
+                          key={user.userId}
+                          onClick={() => !isRoleDisabled && toggleSelectUser(user.userId)}
+                          className={`border-b border-white/5 transition ${
+                            isRoleDisabled
+                              ? "opacity-30 cursor-not-allowed"
+                              : isSelected
+                              ? "bg-sky-500/10 hover:bg-sky-500/15 cursor-pointer"
+                              : user.isArchived
+                              ? "opacity-60 bg-red-950/10 hover:bg-white/2 cursor-pointer"
+                              : "hover:bg-white/2 cursor-pointer"
+                          }`}
+                        >
+                          <td className="px-4 py-4 text-center" onClick={e => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              disabled={isRoleDisabled}
+                              onChange={() => !isRoleDisabled && toggleSelectUser(user.userId)}
+                              className="accent-sky-400 cursor-pointer w-4 h-4 disabled:opacity-30 disabled:cursor-not-allowed"
+                            />
+                          </td>
+                          <td className="px-5 py-4">
+                            <div className="flex items-center gap-3">
                             <div className="w-9 h-9 rounded-full bg-gradient-to-br from-sky-500 to-blue-600 flex items-center justify-center text-xs font-bold text-white shadow">
                               {(user.name || user.email)?.[0]?.toUpperCase()}
                             </div>
@@ -836,8 +1192,9 @@ export default function DashboardPage() {
                             Manage Role
                           </button>
                         </td>
-                      </tr>
-                    ))
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -1086,6 +1443,427 @@ export default function DashboardPage() {
           </>
         )}
       </main>
+
+      {/* ══════════════════ FLOATING SELECTION TOOLBAR ══════════════════ */}
+      <AnimatePresence>
+        {selectedUserIds.length > 0 && activeSelectedRole && (
+          <motion.div
+            initial={{ opacity: 0, y: 24 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 24 }}
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 px-5 py-3 bg-slate-800 border border-white/15 rounded-2xl shadow-2xl shadow-black/60 backdrop-blur"
+          >
+            <div className="flex items-center gap-2">
+              {activeSelectedRole === "nurse" ? (
+                <Stethoscope size={16} className="text-emerald-400" />
+              ) : (
+                <UserCheck size={16} className="text-sky-400" />
+              )}
+              <span className="text-xs font-semibold text-white">
+                <span className={activeSelectedRole === "nurse" ? "text-emerald-400" : "text-sky-400"}>
+                  {selectedUserIds.length}
+                </span>{" "}
+                {activeSelectedRole === "nurse"
+                  ? `Nurse${selectedUserIds.length !== 1 ? "s" : ""}`
+                  : `Patient${selectedUserIds.length !== 1 ? "s" : ""}`}{" "}
+                selected
+              </span>
+            </div>
+
+            <div className="w-px h-4 bg-white/20" />
+
+            <button
+              onClick={openExportModal}
+              className={`flex items-center gap-1.5 text-xs font-semibold px-3.5 py-1.5 rounded-xl transition cursor-pointer shadow-md ${
+                activeSelectedRole === "nurse"
+                  ? "bg-emerald-600 hover:bg-emerald-500 text-white"
+                  : "bg-sky-600 hover:bg-sky-500 text-white"
+              }`}
+            >
+              <FileDown size={14} />
+              {activeSelectedRole === "nurse" ? "Export Nurse Caseload Report" : "Export Patient Logs"}
+            </button>
+
+            <button
+              onClick={() => setSelectedUserIds([])}
+              className="text-slate-400 hover:text-white transition cursor-pointer p-1"
+              title="Clear selection"
+            >
+              <X size={15} />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ══════════════════ MODAL: DEDICATED ROLE EXPORT (PATIENT OR NURSE) ══════════════════ */}
+      <AnimatePresence>
+        {showExportModal && activeSelectedRole && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+            onClick={(e) => { if (e.target === e.currentTarget && !exporting) setShowExportModal(false); }}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0, y: 16 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 16 }}
+              transition={{ type: "spring", stiffness: 300, damping: 28 }}
+              className="bg-slate-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between px-6 py-5 border-b border-white/10 bg-slate-900/60">
+                <div className="flex items-center gap-3">
+                  <div
+                    className={`p-2.5 rounded-xl ${
+                      activeSelectedRole === "nurse" ? "bg-emerald-500/15 text-emerald-400" : "bg-sky-500/15 text-sky-400"
+                    }`}
+                  >
+                    {activeSelectedRole === "nurse" ? <Stethoscope size={20} /> : <FileDown size={20} />}
+                  </div>
+                  <div>
+                    <h2 className="text-base font-bold text-white">
+                      {activeSelectedRole === "nurse"
+                        ? "Export Nurse Caseload & Shift Report"
+                        : "Export Patient Activity Logs & Fluid History"}
+                    </h2>
+                    <p className="text-xs text-slate-400">
+                      {activeSelectedRole === "nurse"
+                        ? `Exporting care caseload and handled patient monitoring for ${selectedUserIds.length} nurse(s)`
+                        : `Exporting fluid intake and output logs for ${selectedUserIds.length} patient(s)`}
+                    </p>
+                  </div>
+                </div>
+                {!exporting && (
+                  <button onClick={() => setShowExportModal(false)} className="text-slate-400 hover:text-white transition cursor-pointer p-1">
+                    <X size={18} />
+                  </button>
+                )}
+              </div>
+
+              {/* Scrollable Body */}
+              <div className="px-6 py-5 space-y-5 overflow-y-auto flex-1">
+                {/* 1. Selected Accounts Pill List */}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-2">
+                    {activeSelectedRole === "nurse" ? "Selected Nurses" : "Selected Patients"}
+                  </label>
+                  <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto p-2 rounded-xl bg-white/2 border border-white/5">
+                    {selectedUserIds.map((uid) => {
+                      const u = users.find((x) => x.userId === uid);
+                      if (!u) return null;
+                      return (
+                        <span
+                          key={uid}
+                          className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-lg border ${
+                            activeSelectedRole === "nurse"
+                              ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                              : "bg-sky-500/15 text-sky-300 border-sky-500/30"
+                          }`}
+                        >
+                          {activeSelectedRole === "nurse" ? <Stethoscope size={11} /> : <UserCheck size={11} />}
+                          <strong className="text-white">{u.name || "Unnamed"}</strong>
+                          <span className="text-[10px] opacity-75">{u.email}</span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 2. NURSE-ONLY: Handled Patients Care Selection */}
+                {activeSelectedRole === "nurse" && (
+                  <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-300">
+                          <Stethoscope size={14} />
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-emerald-200">Handled Patients Selection</p>
+                          <p className="text-[11px] text-slate-400">
+                            Choose which patients handled by the nurse(s) to include in the report.
+                          </p>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => setIncludeNursePatients((prev) => !prev)}
+                        className={`px-3 py-1 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+                          includeNursePatients
+                            ? "bg-emerald-500 text-slate-950 border-emerald-400 font-bold"
+                            : "bg-white/5 text-slate-400 border-white/10"
+                        }`}
+                      >
+                        {includeNursePatients ? "Patients Included" : "Caseload Summary Only"}
+                      </button>
+                    </div>
+
+                    {includeNursePatients && (
+                      <div className="space-y-3 pt-1">
+                        {users
+                          .filter((u) => selectedUserIds.includes(u.userId) && u.role === "nurse")
+                          .map((nurse) => {
+                            const handled = allPatients.filter(
+                              (p) => p.assignedNurseIds?.includes(nurse.userId) || nurse.assignedPatientIds?.includes(p.userId)
+                            );
+                            const chosenIds = selectedNursePatientIds[nurse.userId] || [];
+                            const allChosen = handled.length > 0 && chosenIds.length === handled.length;
+
+                            return (
+                              <div key={nurse.userId} className="p-3 rounded-lg bg-slate-900/80 border border-white/10 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-semibold text-white flex items-center gap-1.5">
+                                    <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                                    {nurse.name}’s Handled Patients
+                                    <span className="text-[11px] text-slate-400 font-normal">
+                                      ({chosenIds.length} of {handled.length} selected)
+                                    </span>
+                                  </span>
+
+                                  {handled.length > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleAllNursePatients(nurse.userId, handled.map((p) => p.userId))}
+                                      className="text-[11px] font-semibold text-sky-400 hover:text-sky-300 transition cursor-pointer"
+                                    >
+                                      {allChosen ? "Deselect All" : "Select All"}
+                                    </button>
+                                  )}
+                                </div>
+
+                                {handled.length === 0 ? (
+                                  <p className="text-[11px] text-slate-500 italic">No patients currently assigned to this nurse.</p>
+                                ) : (
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-36 overflow-y-auto pt-1">
+                                    {handled.map((patient) => {
+                                      const isChecked = chosenIds.includes(patient.userId);
+                                      return (
+                                        <div
+                                          key={patient.userId}
+                                          onClick={() => toggleNursePatient(nurse.userId, patient.userId)}
+                                          className={`flex items-center gap-2 p-2 rounded-lg border text-xs cursor-pointer transition ${
+                                            isChecked
+                                              ? "bg-emerald-500/15 border-emerald-500/40 text-white"
+                                              : "bg-white/2 border-white/5 text-slate-400 hover:bg-white/5"
+                                          }`}
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={isChecked}
+                                            onChange={() => {}}
+                                            className="w-3.5 h-3.5 rounded text-emerald-500 bg-white/10 border-white/20 focus:ring-0 cursor-pointer"
+                                          />
+                                          <div className="truncate">
+                                            <p className="font-semibold text-white truncate text-[11px]">{patient.name || "Unnamed"}</p>
+                                            <p className="text-[10px] text-slate-400 truncate">{patient.email}</p>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 3. Field & Column Customization */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-300">
+                      <CheckSquare size={14} className={activeSelectedRole === "nurse" ? "text-emerald-400" : "text-sky-400"} />
+                      Include Fields & Columns
+                    </label>
+                    <div className="flex items-center gap-2 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={resetToDefaultColumns}
+                        className="font-medium text-slate-400 hover:text-white transition cursor-pointer"
+                      >
+                        Default Fields
+                      </button>
+                      <span className="text-slate-600">|</span>
+                      <button
+                        type="button"
+                        onClick={selectAllColumns}
+                        className={`font-medium transition cursor-pointer ${
+                          activeSelectedRole === "nurse" ? "text-emerald-400 hover:text-emerald-300" : "text-sky-400 hover:text-sky-300"
+                        }`}
+                      >
+                        Select All
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 p-2 rounded-xl bg-white/2 border border-white/5 max-h-36 overflow-y-auto">
+                    {(activeSelectedRole === "nurse" ? NURSE_EXPORT_COLUMNS : PATIENT_EXPORT_COLUMNS).map((col) => {
+                      const isChecked = selectedColumnIds.includes(col.id);
+                      return (
+                        <div
+                          key={col.id}
+                          onClick={() => toggleColumn(col.id)}
+                          className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-xs cursor-pointer transition select-none ${
+                            isChecked
+                              ? activeSelectedRole === "nurse"
+                                ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
+                                : "bg-sky-500/15 border-sky-500/40 text-sky-200"
+                              : "bg-white/2 border-white/5 text-slate-500 hover:text-slate-300"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {}}
+                            className={`w-3.5 h-3.5 rounded bg-white/10 border-white/20 focus:ring-0 cursor-pointer ${
+                              activeSelectedRole === "nurse" ? "text-emerald-500" : "text-sky-500"
+                            }`}
+                          />
+                          <span className="truncate text-[11px] font-medium" title={col.label}>
+                            {col.label}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Database IDs and internal technical fields are unchecked by default for clean reports.
+                  </p>
+                </div>
+
+                {/* 4. Date Range Filter & Quick Presets */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-300">
+                      <CalendarRange size={14} className="text-sky-400" />
+                      Date Range Filter
+                    </label>
+                    <span className="text-[11px] text-slate-500">Filters recorded fluid entries</span>
+                  </div>
+
+                  {/* Preset Pills */}
+                  <div className="flex flex-wrap gap-1.5">
+                    {(
+                      [
+                        { id: "all", label: "All Time" },
+                        { id: "today", label: "Today" },
+                        { id: "7d", label: "Last 7 Days" },
+                        { id: "30d", label: "Last 30 Days" },
+                        { id: "month", label: "This Month" },
+                      ] as const
+                    ).map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => applyDatePreset(p.id)}
+                        disabled={exporting}
+                        className={`px-3 py-1 rounded-lg text-xs font-medium transition cursor-pointer border ${
+                          exportPreset === p.id
+                            ? activeSelectedRole === "nurse"
+                              ? "bg-emerald-600 text-white border-emerald-500 shadow-sm"
+                              : "bg-sky-600 text-white border-sky-500 shadow-sm"
+                            : "bg-white/5 text-slate-400 border-white/10 hover:text-white hover:bg-white/10"
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Custom Date Pickers */}
+                  <div className="grid grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="text-[11px] font-medium text-slate-400 mb-1 block">Start Date (From)</label>
+                      <input
+                        type="date"
+                        value={exportDateFrom}
+                        onChange={(e) => {
+                          setExportDateFrom(e.target.value);
+                          setExportPreset("all");
+                        }}
+                        disabled={exporting}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50 [color-scheme:dark]"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-medium text-slate-400 mb-1 block">End Date (To)</label>
+                      <input
+                        type="date"
+                        value={exportDateTo}
+                        onChange={(e) => {
+                          setExportDateTo(e.target.value);
+                          setExportPreset("all");
+                        }}
+                        disabled={exporting}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50 [color-scheme:dark]"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4. Export Action Buttons */}
+                <div className="pt-2 space-y-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {/* CSV Export Button */}
+                    <button
+                      onClick={handleExportLogsCSV}
+                      disabled={exporting}
+                      className="flex flex-col items-start p-3.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 transition cursor-pointer disabled:opacity-50 text-left group"
+                    >
+                      <div className="flex items-center justify-between w-full mb-1.5">
+                        <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                          <Download size={14} className={activeSelectedRole === "nurse" ? "text-emerald-400" : "text-sky-400"} />
+                          Export as CSV
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-slate-400">.CSV</span>
+                      </div>
+                      <p className="text-[11px] text-slate-400">
+                        {activeSelectedRole === "nurse"
+                          ? "Nurse caseload dataset with handled patient balances and shift logs for spreadsheets."
+                          : "Itemized patient fluid intake & output logs dataset formatted with UTF-8 BOM for Excel."}
+                      </p>
+                    </button>
+
+                    {/* PDF Export Button */}
+                    <button
+                      onClick={handleExportLogsPDF}
+                      disabled={exporting}
+                      className={`flex flex-col items-start p-3.5 rounded-xl transition cursor-pointer disabled:opacity-50 text-left shadow-lg group ${
+                        activeSelectedRole === "nurse"
+                          ? "bg-emerald-600/90 hover:bg-emerald-500 border border-emerald-400/40 shadow-emerald-950/50"
+                          : "bg-sky-600/90 hover:bg-sky-500 border border-sky-400/40 shadow-sky-950/50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between w-full mb-1.5">
+                        <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                          <FileDown size={14} className="text-white" />
+                          {activeSelectedRole === "nurse" ? "Export Nurse Report (PDF)" : "Export Clinical Report (PDF)"}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/20 text-white font-semibold">.PDF</span>
+                      </div>
+                      <p className="text-[11px] text-slate-100">
+                        {activeSelectedRole === "nurse"
+                          ? "Executive nurse shift report with caseload fluid balance summary table and patient care audits."
+                          : "Formal medical report layout with KPI fluid summaries, badges, and chronological audit tables."}
+                      </p>
+                    </button>
+                  </div>
+
+                  {exporting && (
+                    <div className="flex items-center justify-center gap-2 py-2 text-xs text-sky-400 font-medium">
+                      <Loader2 size={15} className="animate-spin" />
+                      <span>Compiling clinical records & building document…</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ══════════════════ MODAL: ASSIGN NURSES TO PATIENT ══════════════════ */}
       <AnimatePresence>
