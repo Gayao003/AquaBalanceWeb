@@ -4,7 +4,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   Users, LogOut, Droplets, Search, X, ChevronDown, Save, AlertCircle, CheckCircle2,
   Loader2, UserCheck, Stethoscope, Download, ChevronLeft, ChevronRight,
-  Archive, RotateCcw, Mail, Settings, Activity, UserPlus, Lock, Unlock
+  Archive, RotateCcw, Mail, Settings, Activity, UserPlus, Lock, Unlock,
+  Eye, EyeOff, Copy, ShieldCheck,
 } from "lucide-react";
 import {
   getAllUsers, updateUserRole, toggleArchiveUser, sendUserPasswordReset,
@@ -12,6 +13,7 @@ import {
   getHealthProfilesForUser, getUserIntakeEntries,
   getUserOutputEntries, signOut, UserProfile, HealthProfile,
   IntakeRecord, OutputRecord,
+  createManagedUser, CreateManagedUserResult,
 } from "@/lib/firestore";
 import { useRouter } from "next/navigation";
 import { auth } from "@/lib/firebase";
@@ -65,6 +67,17 @@ export default function DashboardPage() {
   const [outputLogs, setOutputLogs] = useState<OutputRecord[]>([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [activeLogTab, setActiveLogTab] = useState<"intake" | "output">("intake");
+
+  // Add User Modal
+  const [showAddUser, setShowAddUser] = useState(false);
+  const [addName, setAddName] = useState("");
+  const [addEmail, setAddEmail] = useState("");
+  const [addRole, setAddRole] = useState<"patient" | "nurse">("patient");
+  const [addSendEmail, setAddSendEmail] = useState(true);
+  const [addingUser, setAddingUser] = useState(false);
+  const [addResult, setAddResult] = useState<CreateManagedUserResult | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const showToast = useCallback((t: Toast) => {
     setToast(t);
@@ -288,6 +301,43 @@ export default function DashboardPage() {
     router.replace("/admin/login");
   }
 
+  function openAddUserModal() {
+    setAddName("");
+    setAddEmail("");
+    setAddRole("patient");
+    setAddSendEmail(true);
+    setAddResult(null);
+    setShowPassword(false);
+    setCopied(false);
+    setShowAddUser(true);
+  }
+
+  async function handleAddUser() {
+    if (!addName.trim() || !addEmail.trim()) {
+      showToast({ type: "error", msg: "Please fill in both name and email." });
+      return;
+    }
+    setAddingUser(true);
+    try {
+      const result = await createManagedUser(addName.trim(), addEmail.trim(), addRole, addSendEmail);
+      setAddResult(result);
+      await loadUsers();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to create user.";
+      showToast({ type: "error", msg });
+    } finally {
+      setAddingUser(false);
+    }
+  }
+
+  function copyPassword() {
+    if (addResult) {
+      navigator.clipboard.writeText(addResult.password);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }
+
   const currentUser = auth.currentUser;
 
   return (
@@ -407,6 +457,12 @@ export default function DashboardPage() {
               </button>
             )}
             <button
+              onClick={openAddUserModal}
+              className="flex items-center gap-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-xl px-4 py-2.5 transition cursor-pointer shadow-lg shadow-sky-900/40"
+            >
+              <UserPlus size={14} /> Add User
+            </button>
+            <button
               onClick={loadUsers}
               className="text-xs text-slate-400 hover:text-white bg-slate-900 border border-white/10 rounded-xl px-4 py-2.5 transition cursor-pointer"
             >
@@ -414,6 +470,185 @@ export default function DashboardPage() {
             </button>
           </div>
         </div>
+
+        {/* ══════════════════ ADD USER MODAL ══════════════════ */}
+        <AnimatePresence>
+          {showAddUser && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
+              onClick={(e) => { if (e.target === e.currentTarget && !addingUser) setShowAddUser(false); }}
+            >
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0, y: 16 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.95, opacity: 0, y: 16 }}
+                transition={{ type: "spring", stiffness: 300, damping: 28 }}
+                className="bg-slate-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between px-6 py-5 border-b border-white/5">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 rounded-xl bg-sky-500/15 text-sky-400">
+                      <UserPlus size={18} />
+                    </div>
+                    <div>
+                      <h2 className="text-base font-bold text-white">Add New User</h2>
+                      <p className="text-xs text-slate-500">Register a nurse or patient account</p>
+                    </div>
+                  </div>
+                  {!addingUser && (
+                    <button onClick={() => setShowAddUser(false)} className="text-slate-500 hover:text-white transition cursor-pointer">
+                      <X size={18} />
+                    </button>
+                  )}
+                </div>
+
+                {/* Body */}
+                <div className="px-6 py-5 space-y-4">
+                  {!addResult ? (
+                    /* ── Form View ── */
+                    <>
+                      {/* Full Name */}
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-400 mb-1.5">Full Name</label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Maria Santos"
+                          value={addName}
+                          onChange={(e) => setAddName(e.target.value)}
+                          disabled={addingUser}
+                          className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50"
+                        />
+                      </div>
+
+                      {/* Email */}
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-400 mb-1.5">Email Address</label>
+                        <input
+                          type="email"
+                          placeholder="user@gmail.com"
+                          value={addEmail}
+                          onChange={(e) => setAddEmail(e.target.value)}
+                          disabled={addingUser}
+                          className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50"
+                        />
+                      </div>
+
+                      {/* Role */}
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-400 mb-1.5">Assign Role</label>
+                        <div className="flex gap-2">
+                          {(["patient", "nurse"] as const).map((r) => (
+                            <button
+                              key={r}
+                              onClick={() => setAddRole(r)}
+                              disabled={addingUser}
+                              className={`flex-1 py-2.5 rounded-xl text-xs font-semibold border transition cursor-pointer disabled:opacity-50 ${
+                                addRole === r
+                                  ? r === "nurse"
+                                    ? "bg-emerald-500/20 border-emerald-500/50 text-emerald-300"
+                                    : "bg-sky-500/20 border-sky-500/50 text-sky-300"
+                                  : "bg-white/5 border-white/10 text-slate-400 hover:text-white"
+                              }`}
+                            >
+                              {r === "nurse" ? <Stethoscope size={12} className="inline mr-1" /> : <UserCheck size={12} className="inline mr-1" />}
+                              {r.charAt(0).toUpperCase() + r.slice(1)}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Send Email Toggle */}
+                      <div
+                        onClick={() => !addingUser && setAddSendEmail((v) => !v)}
+                        className={`flex items-center justify-between px-4 py-3 rounded-xl border cursor-pointer transition ${
+                          addSendEmail ? "bg-sky-500/10 border-sky-500/30" : "bg-white/5 border-white/10"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <Mail size={15} className={addSendEmail ? "text-sky-400" : "text-slate-500"} />
+                          <div>
+                            <p className="text-xs font-semibold text-white">Send password setup email</p>
+                            <p className="text-[11px] text-slate-500">User receives a link to set their own password</p>
+                          </div>
+                        </div>
+                        <div className={`w-9 h-5 rounded-full transition-colors ${addSendEmail ? "bg-sky-500" : "bg-slate-700"} relative flex-shrink-0`}>
+                          <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${addSendEmail ? "translate-x-4" : "translate-x-0.5"}`} />
+                        </div>
+                      </div>
+
+                      {/* Submit */}
+                      <button
+                        onClick={handleAddUser}
+                        disabled={addingUser || !addName.trim() || !addEmail.trim()}
+                        className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold transition cursor-pointer"
+                      >
+                        {addingUser ? (
+                          <><Loader2 size={15} className="animate-spin" /> Creating account…</>
+                        ) : (
+                          <><UserPlus size={15} /> Create Account</>
+                        )}
+                      </button>
+                    </>
+                  ) : (
+                    /* ── Success / Credentials View ── */
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-3 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
+                        <ShieldCheck size={20} className="text-emerald-400 flex-shrink-0" />
+                        <div>
+                          <p className="text-sm font-bold text-emerald-300">Account created!</p>
+                          <p className="text-xs text-slate-400 mt-0.5">{addResult.email} · Role: <span className="capitalize font-semibold text-white">{addRole}</span></p>
+                        </div>
+                      </div>
+
+                      {/* Generated password */}
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-400 mb-1.5">Generated Password</label>
+                        <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-xl px-4 py-2.5">
+                          <span className="flex-1 text-sm font-mono text-white tracking-wider">
+                            {showPassword ? addResult.password : "•".repeat(addResult.password.length)}
+                          </span>
+                          <button onClick={() => setShowPassword((v) => !v)} className="text-slate-500 hover:text-white transition cursor-pointer flex-shrink-0">
+                            {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                          </button>
+                          <button onClick={copyPassword} className={`flex-shrink-0 transition cursor-pointer ${copied ? "text-emerald-400" : "text-slate-500 hover:text-white"}`}>
+                            <Copy size={15} />
+                          </button>
+                        </div>
+                        <p className="text-[11px] text-slate-500 mt-1.5">
+                          {copied ? "✓ Copied to clipboard!" : "Share this with the user or let them use the setup email."}
+                        </p>
+                      </div>
+
+                      {/* Email status */}
+                      <div className={`flex items-center gap-2.5 px-4 py-3 rounded-xl border text-xs ${
+                        addResult.emailSent
+                          ? "bg-sky-500/10 border-sky-500/30 text-sky-300"
+                          : "bg-slate-800 border-white/10 text-slate-400"
+                      }`}>
+                        <Mail size={14} className="flex-shrink-0" />
+                        {addResult.emailSent
+                          ? "Password setup email sent — user can click the link to choose their own password."
+                          : "No setup email sent — share the password above manually."}
+                      </div>
+
+                      <button
+                        onClick={() => setShowAddUser(false)}
+                        className="w-full py-3 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-white text-sm font-semibold transition cursor-pointer"
+                      >
+                        Done
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
 
         {/* ══════════════════ VIEW 1: USER ROSTER & ROLE ACCESS ══════════════════ */}
         {activeView === "users" && (

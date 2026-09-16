@@ -4,7 +4,10 @@ import {
   signOut as firebaseSignOut,
   onAuthStateChanged,
   sendPasswordResetEmail,
+  createUserWithEmailAndPassword,
+  updateProfile,
   User,
+  getAuth,
 } from "firebase/auth";
 import {
   collection,
@@ -17,7 +20,9 @@ import {
   orderBy,
   where,
 } from "firebase/firestore";
+import { initializeApp, deleteApp } from "firebase/app";
 import { auth, db } from "./firebase";
+import { FIREBASE_CONFIG } from "./config";
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
@@ -44,6 +49,86 @@ export function onAuthChange(callback: (user: User | null) => void) {
 
 export async function sendUserPasswordReset(email: string) {
   return sendPasswordResetEmail(auth, email);
+}
+
+/** Generate a cryptographically-random 12-character password */
+function generateRandomPassword(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$";
+  let password = "";
+  const array = new Uint32Array(12);
+  crypto.getRandomValues(array);
+  for (const val of array) {
+    password += chars[val % chars.length];
+  }
+  return password;
+}
+
+export interface CreateManagedUserResult {
+  uid: string;
+  email: string;
+  password: string;
+  emailSent: boolean;
+}
+
+/**
+ * Creates a new Firebase Auth account + Firestore profile without signing out
+ * the current admin. Uses a temporary secondary Firebase app instance to
+ * isolate the createUserWithEmailAndPassword call.
+ */
+export async function createManagedUser(
+  name: string,
+  email: string,
+  role: "patient" | "nurse",
+  sendSetupEmail: boolean
+): Promise<CreateManagedUserResult> {
+  const password = generateRandomPassword();
+
+  // Use a secondary app so the admin session is not affected
+  const secondaryApp = initializeApp(FIREBASE_CONFIG, `temp-create-${Date.now()}`);
+  const secondaryAuth = getAuth(secondaryApp);
+
+  let uid: string;
+  try {
+    const credential = await createUserWithEmailAndPassword(secondaryAuth, email, password);
+    uid = credential.user.uid;
+    await updateProfile(credential.user, { displayName: name });
+    await secondaryAuth.signOut();
+  } finally {
+    await deleteApp(secondaryApp);
+  }
+
+  // Write Firestore profile with the chosen role
+  const now = new Date().toISOString();
+  await setDoc(doc(db, "users", uid), {
+    userId: uid,
+    email,
+    name,
+    role,
+    volumeUnit: "ml",
+    enableNotifications: true,
+    darkMode: false,
+    seniorMode: false,
+    isArchived: false,
+    assignedNurseIds: [],
+    assignedPatientIds: [],
+    isScheduleLocked: false,
+    createdAt: now,
+    lastUpdated: now,
+  });
+
+  // Optionally send a password-reset email so the user can choose their own password
+  let emailSent = false;
+  if (sendSetupEmail) {
+    try {
+      await sendPasswordResetEmail(auth, email);
+      emailSent = true;
+    } catch {
+      // Non-fatal — admin can still share the generated password manually
+      emailSent = false;
+    }
+  }
+
+  return { uid, email, password, emailSent };
 }
 
 // ─── User Management ─────────────────────────────────────────────────────────
